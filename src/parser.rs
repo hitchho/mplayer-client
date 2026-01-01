@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use basic_toml;
-use serde::{self, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, Default)]
 pub enum Sorting {
     #[default]
@@ -23,6 +23,21 @@ pub struct Scripts {
     pub all: Option<PathBuf>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct SoulseekSettings {
+    pub enabled: Option<bool>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub server_host: Option<String>,
+    pub server_port: Option<u16>,
+    pub listen_port: Option<u16>,
+    pub max_results: Option<usize>,
+    /// directory to save downloaded files
+    pub download_dir: Option<PathBuf>,
+    /// directory to share (optional, uses dummy file if not set)
+    pub share_dir: Option<PathBuf>,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(tag = "config")]
 pub struct Config {
@@ -31,6 +46,7 @@ pub struct Config {
     pub genre: Option<bool>,
     pub scripts: Option<Scripts>,
     pub step_size: Option<usize>,
+    pub soulseek: Option<SoulseekSettings>,
 }
 
 impl Default for Config {
@@ -41,6 +57,7 @@ impl Default for Config {
             genre: Some(false),
             scripts: None,
             step_size: Some(7),
+            soulseek: None,
         }
     }
 }

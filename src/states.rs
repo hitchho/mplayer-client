@@ -48,6 +48,7 @@ pub struct Batch {
     pub sort: Sort,
 }
 
+#[derive(Default)]
 pub struct Streams {
     pub paused_stream: Option<PausedStream>,
     pub resumed_stream: Option<ResumedStream>,
@@ -59,23 +60,6 @@ pub struct Streams {
     pub playlist_loaded: Option<PlaylistLoadedStream>,
     pub playlist_deleted: Option<PlaylistDeletedStream>,
     pub playlist_created: Option<PlaylistCreatedStream>,
-}
-
-impl Default for Streams {
-    fn default() -> Self {
-        Self {
-            paused_stream: None,
-            resumed_stream: None,
-            stopped_stream: None,
-            music_played_stream: None,
-            volume_changed_stream: None,
-            sorted_stream: None,
-            playlist_updated: None,
-            playlist_loaded: None,
-            playlist_deleted: None,
-            playlist_created: None,
-        }
-    }
 }
 
 /// Handle state management with the bus server
@@ -95,12 +79,12 @@ impl<'a> State<'a> {
     fn handle_state(input: &str) -> Status {
         // stopping or stopped
         if input.contains("Stopped") {
-            return Status::Stopping;
+            Status::Stopping
         // Pausing or paused
         } else if input.contains("Pausing") {
-            return Status::Pausing;
+            Status::Pausing
         } else {
-            return Status::Playing;
+            Status::Playing
         }
     }
 
@@ -112,8 +96,8 @@ impl<'a> State<'a> {
     fn handle_volume(input: &str) -> f64 {
         let lines = input.splitn(2, ":").collect::<Vec<&str>>();
         let volume_s = lines.get(1).unwrap_or(&"0.5").trim();
-        let volume = volume_s.parse::<f64>().unwrap();
-        volume
+
+        volume_s.parse::<f64>().unwrap()
     }
 
     /// gets the syncronized played duration
@@ -367,7 +351,7 @@ impl<'a> State<'a> {
     }
 
     pub(crate) async fn decrease_volume(&self) {
-        self.proxy.volume(self.volume() as f32 - 0.1).await.unwrap();
+        self.proxy.volume(self.volume() - 0.1).await.unwrap();
     }
 
     pub(crate) async fn sort(&self, sort: crate::Sort) {

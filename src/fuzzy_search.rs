@@ -35,7 +35,7 @@ pub fn fuzzy_search_music_titles_sorted<'a>(s: &'a str, list: &'a Vec<Music>) ->
             Ordering::Greater
         }
     });
-    return toreturn;
+    toreturn
 }
 
 pub fn fuzzy_search_music_grene_best_n(s: &str, list: &Vec<Music>, n: usize) -> Vec<Music> {
@@ -65,7 +65,7 @@ fn fuzzy_search_music_genre_sorted(s: &str, list: &Vec<Music>) -> Vec<Music> {
             Ordering::Greater
         }
     });
-    return toreturn;
+    toreturn
 }
 
 pub fn fuzzy_search_music_duration_best_n(s: &str, list: &Vec<Music>, n: usize) -> Vec<Music> {
@@ -100,7 +100,7 @@ fn fuzzy_search_music_duration_sorted(s: &str, list: &Vec<Music>) -> Vec<Music> 
             Ordering::Greater
         }
     });
-    return toreturn;
+    toreturn
 }
 
 pub fn fuzzy_search_music_artist_best_n(s: &str, list: &Vec<Music>, n: usize) -> Vec<Music> {
@@ -130,5 +130,5 @@ fn fuzzy_search_artist_sorted(s: &str, list: &Vec<Music>) -> Vec<Music> {
             Ordering::Greater
         }
     });
-    return toreturn;
+    toreturn
 }

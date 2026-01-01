@@ -28,6 +28,7 @@ use tokio::time::Interval;
 use tui_input::{Input, InputRequest, StateChanged};
 
 use crate::allowed_commands::{CommandContext, CommandName};
+use crate::soulseek_types::{ConnectionState, Download, DownloadState, RankedFile};
 use crate::states::State;
 use crate::utils::{log, FPSController};
 use crate::{fuzzy_search, Config, Lyrics, PlayingStatus, ServerProxy};
@@ -121,7 +122,7 @@ impl ViewGeometry {
             init.y = init.height.saturating_sub(2);
             if self.configuration.search {
                 init.height = init.height.saturating_sub(1);
-                init.y = init.y + 1;
+                init.y += 1;
             }
             self.lyrics = Some(init);
         } else {
@@ -136,7 +137,7 @@ impl ViewGeometry {
             init.y = init.height.saturating_sub(2);
             if self.configuration.search {
                 init.height = init.height.saturating_sub(1);
-                init.y = init.y + 1;
+                init.y += 1;
             }
             self.playlists = Some(init);
         } else {
@@ -149,7 +150,7 @@ impl ViewGeometry {
             let mut init = self.frame;
             init.y = init.height.saturating_sub(10);
             if self.configuration.lyrics {
-                init.y = init.y / 2;
+                init.y /= 2;
                 init.y = init.y.saturating_sub(1);
             }
             init.height = 3;
@@ -164,7 +165,7 @@ impl ViewGeometry {
             let mut init = self.frame;
             init.y = init.height.saturating_sub(10);
             if self.configuration.lyrics {
-                init.y = init.y / 2;
+                init.y /= 2;
                 init.y = init.y.saturating_sub(1);
             }
             init.height = 3;
@@ -187,15 +188,15 @@ impl ViewGeometry {
         let mut area = self.frame;
         area.y = area.height.saturating_sub(4);
         area.height = 3;
-        area.width = (area.width / 5) * 4 as u16;
+        area.width = (area.width / 5) * 4_u16;
         self.slider = area;
     }
 
     fn calculate_volume(&mut self) {
         let mut area = self.frame;
         area.y = area.height.saturating_sub(4);
-        area.x = (area.width / 5) * 4 as u16;
-        area.width = area.width - area.x as u16;
+        area.x = (area.width / 5) * 4_u16;
+        area.width -= area.x;
         area.height = 3;
         self.volume = area;
     }
@@ -354,6 +355,20 @@ pub struct UI<'a> {
     pub scripts: Option<Functions>,
     /// Lua interpreter
     pub lua: Lua,
+    /// Ranked search results from server (sorted by quality)
+    pub soulseek_ranked: Vec<RankedFile>,
+    /// Soulseek status message
+    pub soulseek_status: String,
+    /// Active downloads for display
+    pub soulseek_download_list: Vec<Download>,
+    /// Selected index in soulseek results
+    pub soulseek_selected: usize,
+    /// Whether showing soulseek results panel
+    pub soulseek_visible: bool,
+    /// Soulseek connection state
+    pub soulseek_connected: bool,
+    /// Soulseek config from config file (for connect params)
+    pub soulseek_config: Option<crate::parser::SoulseekSettings>,
 }
 
 #[allow(unused)]
@@ -388,7 +403,9 @@ impl Functions {
 
 #[derive(Clone, Deserialize, Serialize)]
 /// all the displayed region
+#[derive(Default)]
 pub enum Region {
+    #[default]
     List,
     Action,
     Seeker,
@@ -397,20 +414,15 @@ pub enum Region {
     Playlist,
     Search,
     Command,
-}
-
-impl Default for Region {
-    fn default() -> Self {
-        Region::List
-    }
+    Soulseek,
 }
 
 impl ListMode {
     pub async fn handle_search<'a>(ui: &mut UI<'a>, key: &KeyEvent) {
         if key.kind == event::KeyEventKind::Press {
             ui.run_list_script(key, ListMode::Search);
-            match key.modifiers {
-                KeyModifiers::NONE => match key.code {
+            if key.modifiers == KeyModifiers::NONE {
+                match key.code {
                     KeyCode::Enter => {
                         ui.play_selected_music().await;
                         ui.reset_querry();
@@ -424,8 +436,7 @@ impl ListMode {
                         return;
                     }
                     _ => {}
-                },
-                _ => {}
+                }
             }
             ui.register_search_query(key.to_owned()).await;
         }
@@ -448,13 +459,13 @@ impl ListMode {
                     KeyCode::Esc => ui.change_list_mode(ListMode::Select),
                     _ => {}
                 },
-                KeyModifiers::ALT => match key.code {
-                    KeyCode::Char(c) => match c {
-                        '/' => ui.change_list_mode(ListMode::Search),
-                        _ => {}
-                    },
-                    _ => {}
-                },
+                KeyModifiers::ALT => {
+                    if let KeyCode::Char(c) = key.code {
+                        if c == '/' {
+                            ui.change_list_mode(ListMode::Search)
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -493,33 +504,32 @@ impl ListMode {
                         },
                         AncitipationMode::Char(c) => {
                             if c == 'g' {
-                                match key.code {
-                                    KeyCode::Char(c) => match c {
-                                        'g' => ui.goto_top(),
-                                        _ => {}
-                                    },
-                                    _ => {}
+                                if let KeyCode::Char(c) = key.code {
+                                    if c == 'g' {
+                                        ui.goto_top()
+                                    }
                                 }
                             }
                             ui.anticipation_mode = AncitipationMode::Normal;
                         }
                     }
                 }
-                KeyModifiers::SHIFT => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'G' => ui.goto_bottom(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
-                KeyModifiers::CONTROL => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'd' => ui.scroll_list_down(),
-                        'u' => ui.scroll_list_up(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
+                KeyModifiers::SHIFT => {
+                    if let KeyCode::Char(c) = key.code {
+                        if c == 'G' {
+                            ui.goto_bottom()
+                        }
+                    }
+                }
+                KeyModifiers::CONTROL => {
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            'd' => ui.scroll_list_down(),
+                            'u' => ui.scroll_list_up(),
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -529,8 +539,8 @@ impl ListMode {
     async fn handle_command(ui: &mut UI<'_>, key: &KeyEvent) -> std::io::Result<bool> {
         if key.kind == event::KeyEventKind::Press {
             ui.run_list_script(key, ListMode::Search);
-            match key.modifiers {
-                KeyModifiers::NONE => match key.code {
+            if key.modifiers == KeyModifiers::NONE {
+                match key.code {
                     KeyCode::Enter => {
                         if ui.run_command().await? {
                             return Ok(true);
@@ -545,8 +555,7 @@ impl ListMode {
                         return Ok(false);
                     }
                     _ => {}
-                },
-                _ => {}
+                }
             }
             ui.register_command_query(key.to_owned()).await;
         }
@@ -556,155 +565,210 @@ impl ListMode {
 
 impl Region {
     pub async fn handle_events<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> io::Result<bool> {
-        Region::handle_global(ui, &key).await;
+        Region::handle_global(ui, key).await;
         // keybind depend on reagion
         match ui.region {
             Region::List => {
-                if Region::handle_list(ui, &key)
+                if Region::handle_list(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Seeker => {
-                if Region::handle_seeker(ui, &key)
+                if Region::handle_seeker(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Volume => {
-                if Region::handle_volume(ui, &key)
+                if Region::handle_volume(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Action => {
-                if Region::handle_action(ui, &key)
+                if Region::handle_action(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Lyrics => {
-                if Region::handle_lyrics(ui, &key)
+                if Region::handle_lyrics(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Search => {
-                if Region::handle_search(ui, &key)
+                if Region::handle_search(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Command => {
-                if Region::handle_command(ui, &key)
+                if Region::handle_command(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
             Region::Playlist => {
-                if Region::handle_playlist(ui, &key)
+                if Region::handle_playlist(ui, key)
                     .await
-                    .is_ok_and(|should_quit| should_quit == true)
+                    .is_ok_and(|should_quit| should_quit)
+                {
+                    return Ok(true);
+                }
+            }
+            Region::Soulseek => {
+                if Region::handle_soulseek(ui, key)
+                    .await
+                    .is_ok_and(|should_quit| should_quit)
                 {
                     return Ok(true);
                 }
             }
         }
-        return Ok(false);
+        Ok(false)
+    }
+
+    async fn handle_soulseek<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> io::Result<bool> {
+        if key.kind == event::KeyEventKind::Press {
+            match key.modifiers {
+                KeyModifiers::NONE => match key.code {
+                    KeyCode::Char('j') => ui.soulseek_down(),
+                    KeyCode::Char('k') => ui.soulseek_up(),
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        ui.soulseek_visible = false;
+                        ui.region = Region::List;
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        ui.soulseek_download_selected().await;
+                    }
+                    KeyCode::Char('d') | KeyCode::Delete => {
+                        ui.soulseek_cancel_selected().await;
+                    }
+                    KeyCode::Char('c') => {
+                        ui.soulseek_clear_finished().await;
+                    }
+                    KeyCode::Char('G') => {
+                        ui.soulseek_goto_bottom();
+                    }
+                    KeyCode::Char(':') => {
+                        ui.mode = ListMode::Command;
+                    }
+                    _ => {}
+                },
+                KeyModifiers::SHIFT => {
+                    if let KeyCode::Char('G') = key.code {
+                        ui.soulseek_goto_bottom()
+                    }
+                }
+                KeyModifiers::CONTROL => match key.code {
+                    KeyCode::Char('d') => ui.soulseek_scroll_down(),
+                    KeyCode::Char('u') => ui.soulseek_scroll_up(),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        Ok(false)
     }
 
     pub async fn handle_global<'a>(ui: &mut UI<'a>, key: &KeyEvent) {
         if key.kind == event::KeyEventKind::Press {
             ui.run_global_script(key, ui.region.clone());
             match key.modifiers {
-                KeyModifiers::NONE => match key.code {
-                    KeyCode::Char(c) => match ui.mode {
-                        ListMode::Search | ListMode::Command => {}
-                        _ => match c {
-                            'm' => ui.toggle_mute().await,
-                            'p' => ui.toggle_play().await,
-                            'n' => ui.play_next().await,
-                            _ => {}
-                        },
-                    },
-                    _ => {}
-                },
-                KeyModifiers::ALT => match ui.mode {
-                    ListMode::Select => match key.code {
-                        KeyCode::Char(c) => match c {
-                            'j' => match ui.region {
-                                Region::List => {
-                                    if ui.displayed_lyrics.displayable {
-                                        ui.select_lyrics_region()
-                                    } else if ui.displayed_playlists.displayable {
-                                        ui.select_playlist_region()
-                                    } else {
-                                        ui.select_action_region()
-                                    }
-                                }
-                                Region::Lyrics | Region::Playlist => ui.select_action_region(),
-                                Region::Action => ui.select_bar_region(),
-                                Region::Seeker => ui.select_list_region(),
-                                Region::Volume => ui.select_list_region(),
-                                Region::Search | Region::Command => {}
-                            },
-                            'k' => match ui.region {
-                                Region::Search | Region::Command => {}
-                                Region::List => ui.select_volume_region(),
-                                Region::Lyrics | Region::Playlist => ui.select_list_region(),
-                                Region::Action => {
-                                    if ui.displayed_lyrics.displayable {
-                                        ui.select_lyrics_region()
-                                    } else if ui.displayed_playlists.displayable {
-                                        ui.select_playlist_region()
-                                    } else {
-                                        ui.select_list_region()
-                                    }
-                                }
-                                Region::Seeker => ui.select_action_region(),
-                                Region::Volume => ui.select_action_region(),
-                            },
-                            'h' | 'l' => match ui.region {
-                                Region::Seeker => ui.select_volume_region(),
-                                Region::Volume => ui.select_bar_region(),
+                KeyModifiers::NONE => {
+                    if let KeyCode::Char(c) = key.code {
+                        match ui.mode {
+                            ListMode::Search | ListMode::Command => {}
+                            _ => match c {
+                                'm' => ui.toggle_mute().await,
+                                'p' => ui.toggle_play().await,
+                                'n' => ui.play_next().await,
                                 _ => {}
                             },
+                        }
+                    }
+                }
+                KeyModifiers::ALT => {
+                    if let ListMode::Select = ui.mode {
+                        if let KeyCode::Char(c) = key.code {
+                            match c {
+                                'j' => match ui.region {
+                                    Region::List => {
+                                        if ui.displayed_lyrics.displayable {
+                                            ui.select_lyrics_region()
+                                        } else if ui.displayed_playlists.displayable {
+                                            ui.select_playlist_region()
+                                        } else {
+                                            ui.select_action_region()
+                                        }
+                                    }
+                                    Region::Lyrics | Region::Playlist => ui.select_action_region(),
+                                    Region::Action => ui.select_bar_region(),
+                                    Region::Seeker => ui.select_list_region(),
+                                    Region::Volume => ui.select_list_region(),
+                                    Region::Search | Region::Command | Region::Soulseek => {}
+                                },
+                                'k' => match ui.region {
+                                    Region::Search | Region::Command | Region::Soulseek => {}
+                                    Region::List => ui.select_volume_region(),
+                                    Region::Lyrics | Region::Playlist => ui.select_list_region(),
+                                    Region::Action => {
+                                        if ui.displayed_lyrics.displayable {
+                                            ui.select_lyrics_region()
+                                        } else if ui.displayed_playlists.displayable {
+                                            ui.select_playlist_region()
+                                        } else {
+                                            ui.select_list_region()
+                                        }
+                                    }
+                                    Region::Seeker => ui.select_action_region(),
+                                    Region::Volume => ui.select_action_region(),
+                                },
+                                'h' | 'l' => match ui.region {
+                                    Region::Seeker => ui.select_volume_region(),
+                                    Region::Volume => ui.select_bar_region(),
+                                    _ => {}
+                                },
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                KeyModifiers::CONTROL => {
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            'l' => ui.toggle_lyrics(),
+                            'p' => ui.toggle_playlists(),
+                            's' => ui.toggle_soulseek(),
                             _ => {}
-                        },
-                        _ => {}
-                    },
-                    _ => {}
-                },
-                KeyModifiers::CONTROL => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'l' => ui.toggle_lyrics(),
-                        'p' => ui.toggle_playlists(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
-                KeyModifiers::SHIFT => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'N' => ui.play_preivous().await,
-                        'D' => ui.download_lyrics(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
+                        }
+                    }
+                }
+                KeyModifiers::SHIFT => {
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            'N' => ui.play_preivous().await,
+                            'D' => ui.download_lyrics(),
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -715,16 +779,13 @@ impl Region {
             ListMode::AfterSearch => {
                 if ListMode::handle_after_search(ui, key)
                     .await
-                    .is_ok_and(|x| x == true)
+                    .is_ok_and(|x| x)
                 {
                     return Ok(true);
                 }
             }
             ListMode::Select => {
-                if ListMode::handle_select(ui, key)
-                    .await
-                    .is_ok_and(|x| x == true)
-                {
+                if ListMode::handle_select(ui, key).await.is_ok_and(|x| x) {
                     return Ok(true);
                 }
             }
@@ -737,12 +798,11 @@ impl Region {
         if key.kind == event::KeyEventKind::Press {
             ui.run_actions_script(key);
             match key.modifiers {
-                KeyModifiers::SHIFT => match key.code {
-                    KeyCode::BackTab => {
+                KeyModifiers::SHIFT => {
+                    if key.code == KeyCode::BackTab {
                         ui.cycle_back();
                     }
-                    _ => {}
-                },
+                }
                 KeyModifiers::NONE => match key.code {
                     KeyCode::Char(c) => match c {
                         'q' => return ui.quit(),
@@ -767,18 +827,16 @@ impl Region {
     pub async fn handle_seeker<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> std::io::Result<bool> {
         if key.kind == event::KeyEventKind::Press {
             ui.run_seeker_script(key);
-            match key.modifiers {
-                KeyModifiers::NONE => match key.code {
-                    KeyCode::Char(c) => match c {
+            if key.modifiers == KeyModifiers::NONE {
+                if let KeyCode::Char(c) = key.code {
+                    match c {
                         'l' => ui.next_5s().await,
                         'h' => ui.previous_5s().await,
                         'k' => ui.toggle_play().await,
                         'q' => return ui.quit(),
                         _ => {}
-                    },
-                    _ => {}
-                },
-                _ => {}
+                    }
+                }
             }
         }
         Ok(false)
@@ -788,23 +846,25 @@ impl Region {
         if key.kind == event::KeyEventKind::Press {
             ui.run_volume_script(key);
             match key.modifiers {
-                KeyModifiers::NONE => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'k' | 'l' => ui.increase_volume().await,
-                        'h' | 'j' => ui.decrease_volume().await,
-                        'q' => return ui.quit(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
-                KeyModifiers::SHIFT => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'j' | 'h' => ui.increase_volume().await,
-                        'k' | 'l' => ui.decrease_volume().await,
-                        _ => {}
-                    },
-                    _ => {}
-                },
+                KeyModifiers::NONE => {
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            'k' | 'l' => ui.increase_volume().await,
+                            'h' | 'j' => ui.decrease_volume().await,
+                            'q' => return ui.quit(),
+                            _ => {}
+                        }
+                    }
+                }
+                KeyModifiers::SHIFT => {
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            'j' | 'h' => ui.increase_volume().await,
+                            'k' | 'l' => ui.decrease_volume().await,
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -831,34 +891,32 @@ impl Region {
                         _ => {}
                     },
                     AncitipationMode::Char(c) => {
-                        match c {
-                            'g' => match key.code {
-                                KeyCode::Char(c) => match c {
-                                    'g' => ui.goto_top_lyrics(),
-                                    _ => {}
-                                },
-                                _ => {}
-                            },
-                            _ => {}
+                        if c == 'g' {
+                            if let KeyCode::Char(c) = key.code {
+                                if c == 'g' {
+                                    ui.goto_top_lyrics()
+                                }
+                            }
                         }
                         ui.anticipation_mode = AncitipationMode::Normal;
                     }
                 },
-                KeyModifiers::SHIFT => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'G' => ui.goto_bottom_lyrics(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
-                KeyModifiers::CONTROL => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'd' => ui.scroll_lyrics_down(),
-                        'u' => ui.scroll_lyrics_up(),
-                        _ => {}
-                    },
-                    _ => {}
-                },
+                KeyModifiers::SHIFT => {
+                    if let KeyCode::Char(c) = key.code {
+                        if c == 'G' {
+                            ui.goto_bottom_lyrics()
+                        }
+                    }
+                }
+                KeyModifiers::CONTROL => {
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            'd' => ui.scroll_lyrics_down(),
+                            'u' => ui.scroll_lyrics_up(),
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -866,32 +924,26 @@ impl Region {
     }
 
     async fn handle_playlist(ui: &mut UI<'_>, key: &KeyEvent) -> std::io::Result<bool> {
-        if key.kind == event::KeyEventKind::Press {
-            match key.modifiers {
-                KeyModifiers::NONE => match key.code {
-                    KeyCode::Char(c) => match c {
-                        'q' => return ui.quit(),
-                        'j' => ui.select_next_playlist_name(),
-                        'k' => ui.select_previous_playlist_name(),
-                        _ => {}
-                    },
-                    KeyCode::Enter => {
-                        ui.switch_to_selected_playlist().await;
-                    }
+        if key.kind == event::KeyEventKind::Press && key.modifiers == KeyModifiers::NONE {
+            match key.code {
+                KeyCode::Char(c) => match c {
+                    'q' => return ui.quit(),
+                    'j' => ui.select_next_playlist_name(),
+                    'k' => ui.select_previous_playlist_name(),
                     _ => {}
                 },
+                KeyCode::Enter => {
+                    ui.switch_to_selected_playlist().await;
+                }
                 _ => {}
             }
         }
-        return Ok(false);
+        Ok(false)
     }
 
     async fn handle_search(ui: &mut UI<'_>, key: &KeyEvent) -> std::io::Result<bool> {
-        match ui.mode {
-            ListMode::Search => {
-                ListMode::handle_search(ui, key).await;
-            }
-            _ => {}
+        if let ListMode::Search = ui.mode {
+            ListMode::handle_search(ui, key).await;
         }
         // Never quit on search mode
         Ok(false)
@@ -973,66 +1025,47 @@ impl<'a> UI<'a> {
     }
 
     pub fn run_list_script(&self, key: &KeyEvent, mode: ListMode) {
-        match &self.scripts {
-            Some(scripts) => match &scripts.list {
-                Some(function) => {
-                    let ev = Event::new(
-                        key.modifiers.into(),
-                        key.code.into(),
-                        Region::List,
-                        Some(mode),
-                    );
-                    let userdata = self.lua.create_userdata(ev);
-                    function.call::<()>(userdata).unwrap();
-                }
-                None => {}
-            },
-            None => {}
+        if let Some(scripts) = &self.scripts {
+            if let Some(function) = &scripts.list {
+                let ev = Event::new(
+                    key.modifiers.into(),
+                    key.code.into(),
+                    Region::List,
+                    Some(mode),
+                );
+                let userdata = self.lua.create_userdata(ev);
+                function.call::<()>(userdata).unwrap();
+            }
         }
     }
 
     pub fn run_global_script(&self, key: &KeyEvent, region: Region) {
-        match &self.scripts {
-            Some(scripts) => {
-                let _ = self.run_script(&scripts.all, key, region, None);
-            }
-            None => {}
+        if let Some(scripts) = &self.scripts {
+            let _ = self.run_script(&scripts.all, key, region, None);
         }
     }
 
     pub fn run_seeker_script(&self, key: &KeyEvent) {
-        match &self.scripts {
-            Some(script) => {
-                let _ = self.run_script(&script.seeker, key, Region::Seeker, None);
-            }
-            None => {}
+        if let Some(script) = &self.scripts {
+            let _ = self.run_script(&script.seeker, key, Region::Seeker, None);
         }
     }
 
     pub fn run_actions_script(&self, key: &KeyEvent) {
-        match &self.scripts {
-            Some(script) => {
-                let _ = self.run_script(&script.seeker, key, Region::Action, None);
-            }
-            None => {}
+        if let Some(script) = &self.scripts {
+            let _ = self.run_script(&script.seeker, key, Region::Action, None);
         }
     }
 
     pub fn run_volume_script(&self, key: &KeyEvent) {
-        match &self.scripts {
-            Some(script) => {
-                let _ = self.run_script(&script.seeker, key, Region::Volume, None);
-            }
-            None => {}
+        if let Some(script) = &self.scripts {
+            let _ = self.run_script(&script.seeker, key, Region::Volume, None);
         }
     }
 
     pub fn run_lyrics_script(&self, key: &KeyEvent) {
-        match &self.scripts {
-            Some(script) => {
-                let _ = self.run_script(&script.seeker, key, Region::Lyrics, None);
-            }
-            None => {}
+        if let Some(script) = &self.scripts {
+            let _ = self.run_script(&script.seeker, key, Region::Lyrics, None);
         }
     }
 
@@ -1058,11 +1091,18 @@ impl<'a> UI<'a> {
             geometry: ViewGeometry::default(Rect::default()),
             internal_clock: tokio::time::interval(Duration::from_secs(1)),
             lua,
+            soulseek_ranked: Vec::new(),
+            soulseek_status: String::new(),
+            soulseek_download_list: Vec::new(),
+            soulseek_selected: 0,
+            soulseek_visible: false,
+            soulseek_connected: false,
+            soulseek_config: None,
         }
     }
 
     pub async fn check_state_streams(&mut self) {
-        let mut ctx = Context::from_waker(&futures::task::noop_waker_ref());
+        let mut ctx = Context::from_waker(futures::task::noop_waker_ref());
         let paused_stream = self.state.dbus_streams.paused_stream.as_mut().unwrap();
         let resumed_stream = self.state.dbus_streams.resumed_stream.as_mut().unwrap();
         let stopped_stream = self.state.dbus_streams.stopped_stream.as_mut().unwrap();
@@ -1084,151 +1124,118 @@ impl<'a> UI<'a> {
         let playlist_loaded_stream = self.state.dbus_streams.playlist_loaded.as_mut().unwrap();
         let sorted_stream = self.state.dbus_streams.sorted_stream.as_mut().unwrap();
 
-        match playlist_updated_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(_) => {
-                let playlist = self.state.proxy.playlist().await.unwrap_or_default();
-                self.music_list.unfiltered_music_list.clear();
-                for (index, music) in playlist.musics.iter().enumerate() {
-                    let music = music.to_owned();
-                    self.music_list.unfiltered_music_list.push(Music {
-                        path: music.path,
-                        title: music.title,
-                        length: music.length,
-                        artist: music.artist,
-                        genre: music.genre,
-                        index,
-                    });
-                }
-                self.music_list.musics = self.music_list.unfiltered_music_list.clone();
-                self.music_list.playing_index = playlist.playing_index as usize;
-                self.state.batch.metadata = self.state.proxy.metadata().await.unwrap_or_default();
-
-                let timer = self.state.proxy.timer().await.unwrap_or_default();
-                let played = timer.0;
-                let full = timer.1;
-                (
-                    self.state.batch.played_duration,
-                    self.state.batch.music_duration,
-                ) = (
-                    Duration::from_secs_f32(played),
-                    Duration::from_secs_f32(full),
-                );
-                self.state.batch.playing_music =
-                    self.state.proxy.playing().await.unwrap_or_default();
+        if let Poll::Ready(_) = playlist_updated_stream.poll_next_unpin(&mut ctx) {
+            let playlist = self.state.proxy.playlist().await.unwrap_or_default();
+            self.music_list.unfiltered_music_list.clear();
+            for (index, music) in playlist.musics.iter().enumerate() {
+                let music = music.to_owned();
+                self.music_list.unfiltered_music_list.push(Music {
+                    path: music.path,
+                    title: music.title,
+                    length: music.length,
+                    artist: music.artist,
+                    genre: music.genre,
+                    index,
+                });
             }
-            _ => {}
+            self.music_list.musics = self.music_list.unfiltered_music_list.clone();
+            self.music_list.playing_index = playlist.playing_index as usize;
+            self.state.batch.metadata = self.state.proxy.metadata().await.unwrap_or_default();
+
+            let timer = self.state.proxy.timer().await.unwrap_or_default();
+            let played = timer.0;
+            let full = timer.1;
+            (
+                self.state.batch.played_duration,
+                self.state.batch.music_duration,
+            ) = (
+                Duration::from_secs_f32(played),
+                Duration::from_secs_f32(full),
+            );
+            self.state.batch.playing_music = self.state.proxy.playing().await.unwrap_or_default();
         }
 
-        match paused_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(_) => {
-                self.state.batch.status = PlayingStatus::Pausing;
-            }
-            _ => {}
+        if let Poll::Ready(_) = paused_stream.poll_next_unpin(&mut ctx) {
+            self.state.batch.status = PlayingStatus::Pausing;
         }
 
-        match resumed_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(_) => {
-                self.state.batch.status = PlayingStatus::Playing;
-            }
-            _ => {}
+        if let Poll::Ready(_) = resumed_stream.poll_next_unpin(&mut ctx) {
+            self.state.batch.status = PlayingStatus::Playing;
         }
 
-        match stopped_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(_) => {
-                self.state.batch.status = PlayingStatus::Stopped;
-            }
-            _ => {}
+        if let Poll::Ready(_) = stopped_stream.poll_next_unpin(&mut ctx) {
+            self.state.batch.status = PlayingStatus::Stopped;
         }
 
-        match music_played.poll_next_unpin(&mut ctx) {
-            Poll::Ready(_) => {
-                self.state.batch.metadata.lyrics =
-                    self.state.proxy.lyrics().await.unwrap_or_default();
-                self.music_list.playing_index =
-                    self.state.proxy.get_playing_index().await.unwrap() as usize;
-                self.state.batch.playing_music = self.state.proxy.playing().await.unwrap();
-                self.state.batch.status = PlayingStatus::Playing;
-            }
-            _ => {}
+        if let Poll::Ready(_) = music_played.poll_next_unpin(&mut ctx) {
+            self.state.batch.metadata.lyrics = self.state.proxy.lyrics().await.unwrap_or_default();
+            self.music_list.playing_index =
+                self.state.proxy.get_playing_index().await.unwrap() as usize;
+            self.state.batch.playing_music = self.state.proxy.playing().await.unwrap();
+            self.state.batch.status = PlayingStatus::Playing;
         }
 
-        match volume_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(v) => {
-                let volume = v.unwrap().args().unwrap().amount.max(0.0).min(1.0);
-                self.state.batch.volume = volume;
-            }
-            _ => {}
+        if let Poll::Ready(v) = volume_stream.poll_next_unpin(&mut ctx) {
+            let volume = v.unwrap().args().unwrap().amount.max(0.0).min(1.0);
+            self.state.batch.volume = volume;
         }
 
-        match playlist_created_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(v) => {
-                self.state
-                    .batch
-                    .playlists_names
-                    .push(v.unwrap().args().unwrap().id().to_string());
-            }
-            _ => {}
+        if let Poll::Ready(v) = playlist_created_stream.poll_next_unpin(&mut ctx) {
+            self.state
+                .batch
+                .playlists_names
+                .push(v.unwrap().args().unwrap().id().to_string());
         }
 
-        match playlist_deleted_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(v) => {
-                let id = v.unwrap().args().unwrap().id().to_string();
-                if let Some(pos) = self
-                    .state
-                    .batch
-                    .playlists_names
-                    .iter()
-                    .position(|x| x.eq(&id))
-                {
-                    self.state.batch.playlists_names.remove(pos);
-                }
+        if let Poll::Ready(v) = playlist_deleted_stream.poll_next_unpin(&mut ctx) {
+            let id = v.unwrap().args().unwrap().id().to_string();
+            if let Some(pos) = self
+                .state
+                .batch
+                .playlists_names
+                .iter()
+                .position(|x| x.eq(&id))
+            {
+                self.state.batch.playlists_names.remove(pos);
             }
-            _ => {}
         }
 
-        match playlist_loaded_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(_) => {
-                self.state.batch.status = PlayingStatus::Stopped;
+        if let Poll::Ready(_) = playlist_loaded_stream.poll_next_unpin(&mut ctx) {
+            self.state.batch.status = PlayingStatus::Stopped;
 
-                let playlist = self.state.proxy.playlist().await.unwrap_or_default();
-                self.music_list.unfiltered_music_list.clear();
-                for (index, music) in playlist.musics.iter().enumerate() {
-                    let music = music.to_owned();
-                    self.music_list.unfiltered_music_list.push(Music {
-                        path: music.path,
-                        title: music.title,
-                        length: music.length,
-                        artist: music.artist,
-                        genre: music.genre,
-                        index,
-                    });
-                }
-                self.music_list.musics = self.music_list.unfiltered_music_list.clone();
-                self.music_list.playing_index = playlist.playing_index as usize;
-                self.state.batch.metadata = self.state.proxy.metadata().await.unwrap_or_default();
-
-                let timer = self.state.proxy.timer().await.unwrap_or_default();
-                let played = timer.0;
-                let full = timer.1;
-                (
-                    self.state.batch.played_duration,
-                    self.state.batch.music_duration,
-                ) = (
-                    Duration::from_secs_f32(played),
-                    Duration::from_secs_f32(full),
-                );
-                self.state.batch.playing_music =
-                    self.state.proxy.playing().await.unwrap_or_default();
+            let playlist = self.state.proxy.playlist().await.unwrap_or_default();
+            self.music_list.unfiltered_music_list.clear();
+            for (index, music) in playlist.musics.iter().enumerate() {
+                let music = music.to_owned();
+                self.music_list.unfiltered_music_list.push(Music {
+                    path: music.path,
+                    title: music.title,
+                    length: music.length,
+                    artist: music.artist,
+                    genre: music.genre,
+                    index,
+                });
             }
-            _ => {}
+            self.music_list.musics = self.music_list.unfiltered_music_list.clone();
+            self.music_list.playing_index = playlist.playing_index as usize;
+            self.state.batch.metadata = self.state.proxy.metadata().await.unwrap_or_default();
+
+            let timer = self.state.proxy.timer().await.unwrap_or_default();
+            let played = timer.0;
+            let full = timer.1;
+            (
+                self.state.batch.played_duration,
+                self.state.batch.music_duration,
+            ) = (
+                Duration::from_secs_f32(played),
+                Duration::from_secs_f32(full),
+            );
+            self.state.batch.playing_music = self.state.proxy.playing().await.unwrap_or_default();
         }
 
-        match sorted_stream.poll_next_unpin(&mut ctx) {
-            Poll::Ready(v) => {
-                self.state.batch.sort = v.unwrap().args().unwrap().sort;
-                self.fetch_playlist_data().await;
-            }
-            _ => {}
+        if let Poll::Ready(v) = sorted_stream.poll_next_unpin(&mut ctx) {
+            self.state.batch.sort = v.unwrap().args().unwrap().sort;
+            self.fetch_playlist_data().await;
         }
     }
 
@@ -1305,6 +1312,14 @@ impl<'a> UI<'a> {
         self.music_list.display_genre = config.genre.unwrap_or(false);
         self.music_list.setp_szie = config.step_size.unwrap_or(7);
         self.geometry.configuration.lyrics = self.displayed_lyrics.displayable;
+
+        // store soulseek config for later connection via dbus
+        if let Some(slsk) = &config.soulseek {
+            if slsk.enabled.unwrap_or(false) {
+                self.soulseek_config = Some(slsk.clone());
+                self.soulseek_status = "configured (use :slsk_connect)".to_string();
+            }
+        }
     }
 
     pub fn previous_action(&mut self) {
@@ -1344,15 +1359,9 @@ impl<'a> UI<'a> {
 
     /// plays the *selected* song in the music list
     pub async fn play_selected_music(&mut self) {
-        self.state
-            .play_from_index(
-                self.music_list
-                    .musics
-                    .get(self.music_list.selected)
-                    .unwrap()
-                    .index,
-            )
-            .await;
+        if let Some(music) = self.music_list.musics.get(self.music_list.selected) {
+            self.state.play_from_index(music.index).await;
+        }
     }
 
     /// Moves slection to the `List` region
@@ -1499,26 +1508,24 @@ impl<'a> UI<'a> {
             );
 
         match self.mode {
-            ListMode::Command => match self.geometry.command_geo() {
-                Some(geo) => {
+            ListMode::Command => {
+                if let Some(geo) = self.geometry.command_geo() {
                     frame.render_widget(
                         Paragraph::new(self.command_bufr.value())
                             .block(Block::bordered().title("Querry")),
                         geo,
                     );
                 }
-                None => {}
-            },
-            ListMode::Search | ListMode::AfterSearch => match self.geometry.search_geo() {
-                Some(geo) => {
+            }
+            ListMode::Search | ListMode::AfterSearch => {
+                if let Some(geo) = self.geometry.search_geo() {
                     frame.render_widget(
                         Paragraph::new(self.search_bufr.value())
                             .block(Block::bordered().title("Querry")),
                         geo,
                     );
                 }
-                None => {}
-            },
+            }
             ListMode::Select => {}
         }
 
@@ -1535,14 +1542,14 @@ impl<'a> UI<'a> {
     }
 
     fn get_action_index(&self) -> usize {
-        return match self.action {
+        match self.action {
             PowerActions::BackwardSkip => 0,
             PowerActions::TogglePlay => 1,
             PowerActions::ForwardSkip => 2,
             PowerActions::Stop => 3,
             PowerActions::Repeat => 4,
             PowerActions::Sort => 5,
-        };
+        }
     }
 
     /// Converst timer in the u64 form to a string of form xx:yy
@@ -1562,7 +1569,7 @@ impl<'a> UI<'a> {
             format!("0{}", minities)
         };
 
-        return format!("{}:{}", sminutes, sseconds);
+        format!("{}:{}", sminutes, sseconds)
     }
 
     /// Returns the current playing timer as a string "xx:yy"
@@ -1581,10 +1588,10 @@ impl<'a> UI<'a> {
         if music_length != 0 {
             let mut percent = current as f64 / music_length as f64;
             percent = percent.max(0.0).min(1.0);
-            return percent;
+            percent
         } else {
-            return 0.0;
-        };
+            0.0
+        }
     }
 
     /// Seeks playing time forward by 5 seconds
@@ -1673,11 +1680,6 @@ impl<'a> UI<'a> {
 
     /// Renders the displayed actions
     pub fn render_actions(&mut self, frame: &mut Frame) {
-        let mut area = frame.area();
-        // - seeker hight - action height
-        area.y = area.height - 3 - 4;
-        area.height = 3;
-
         let style = match self.region {
             Region::Action => Style::new().fg(self.style.action_style.active_region_color),
             _ => Style::new().fg(self.style.action_style.passive_region_color),
@@ -1703,11 +1705,8 @@ impl<'a> UI<'a> {
         }
 
         let status = self.state.status();
-        match status {
-            PlayingStatus::Playing => {
-                actions[1] = Span::from("⏸");
-            }
-            _ => {}
+        if let PlayingStatus::Playing = status {
+            actions[1] = Span::from("⏸");
         }
 
         Tabs::new(actions)
@@ -1762,6 +1761,168 @@ impl<'a> UI<'a> {
         self.render_actions(frame);
         self.render_volume(frame);
         self.render_seeker(frame);
+        self.render_soulseek(frame);
+    }
+
+    /// Renders soulseek search results and downloads
+    fn render_soulseek(&mut self, frame: &mut Frame) {
+        if !self.soulseek_visible {
+            return;
+        }
+
+        let area = frame.area();
+        // take right half of screen for soulseek panel
+        let slsk_area = Rect {
+            x: area.width / 2,
+            y: 0,
+            width: area.width / 2,
+            height: area.height.saturating_sub(7),
+        };
+
+        let is_selected = matches!(self.region, Region::Soulseek);
+        let border_style = if is_selected {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        // split into results and downloads
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(slsk_area);
+
+        // render search results
+        self.render_soulseek_results(frame, chunks[0], border_style);
+
+        // render downloads
+        self.render_soulseek_downloads(frame, chunks[1], border_style);
+    }
+
+    fn render_soulseek_results(&self, frame: &mut Frame, area: Rect, border_style: Style) {
+        let title = format!(" soulseek results ({}) ", self.soulseek_ranked.len());
+
+        let rows: Vec<Row> = self
+            .soulseek_ranked
+            .iter()
+            .enumerate()
+            .map(|(i, rf)| {
+                let selected = i == self.soulseek_selected;
+                let style = if selected {
+                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                } else {
+                    Style::default()
+                };
+
+                let format = rf.file.extension().unwrap_or("?");
+                let bitrate = if rf.file.bitrate > 0 {
+                    format!("{}k", rf.file.bitrate)
+                } else {
+                    "-".to_string()
+                };
+                let size_mb = rf.file.size as f64 / 1_048_576.0;
+                let score = rf.quality_score;
+
+                Row::new(vec![
+                    Cell::from(rf.file.basename().to_string()),
+                    Cell::from(format.to_uppercase()),
+                    Cell::from(bitrate),
+                    Cell::from(format!("{:.1}MB", size_mb)),
+                    Cell::from(format!("{}", score)),
+                    Cell::from(rf.username.clone()),
+                ])
+                .style(style)
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Percentage(35),
+            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Length(5),
+            Constraint::Percentage(20),
+        ];
+
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec!["name", "fmt", "kbps", "size", "score", "user"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(title),
+            );
+
+        frame.render_widget(table, area);
+    }
+
+    fn render_soulseek_downloads(&self, frame: &mut Frame, area: Rect, border_style: Style) {
+        let title = format!(
+            " downloads ({}) - {} ",
+            self.soulseek_download_list.len(),
+            self.soulseek_status
+        );
+
+        let rows: Vec<Row> = self
+            .soulseek_download_list
+            .iter()
+            .map(|dl| {
+                let (state_str, style) = match dl.state {
+                    DownloadState::Pending => ("pending", Style::default().fg(Color::Gray)),
+                    DownloadState::Connecting => ("connecting", Style::default().fg(Color::Yellow)),
+                    DownloadState::Downloading => ("downloading", Style::default().fg(Color::Cyan)),
+                    DownloadState::Complete => ("complete", Style::default().fg(Color::Green)),
+                    DownloadState::Failed => ("failed", Style::default().fg(Color::Red)),
+                    DownloadState::Cancelled => ("cancelled", Style::default().fg(Color::Red)),
+                };
+
+                let progress = if dl.state == DownloadState::Downloading {
+                    dl.progress_percent()
+                } else if dl.state == DownloadState::Complete {
+                    "100%".to_string()
+                } else {
+                    "-".to_string()
+                };
+
+                // progress bar
+                let bar_width = 10;
+                let filled = ((dl.progress() * bar_width as f64) as usize).min(bar_width);
+                let bar: String =
+                    format!("[{}{}]", "=".repeat(filled), " ".repeat(bar_width - filled));
+
+                Row::new(vec![
+                    Cell::from(dl.display_name.clone()),
+                    Cell::from(state_str),
+                    Cell::from(bar),
+                    Cell::from(progress),
+                ])
+                .style(style)
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Percentage(50),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(8),
+        ];
+
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec!["file", "state", "progress", "%"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(title),
+            );
+
+        frame.render_widget(table, area);
     }
 
     /// Handles music selection in the music list
@@ -1776,7 +1937,7 @@ impl<'a> UI<'a> {
         if selected_index == 0 {
             self.music_list.selected = quesize - 1;
         } else {
-            self.music_list.selected = self.music_list.selected - 1;
+            self.music_list.selected -= 1;
         }
     }
 
@@ -1788,7 +1949,7 @@ impl<'a> UI<'a> {
         if Some(selected_index) == quesize.checked_sub(1) {
             self.music_list.selected = 0;
         } else {
-            self.music_list.selected = self.music_list.selected + 1;
+            self.music_list.selected += 1;
         }
     }
 
@@ -1893,7 +2054,7 @@ impl<'a> UI<'a> {
             // music has a lyrics, and the lyrics timestamp is correct
             if self.displayed_lyrics.displayable && lyrics.time_is_correct {
                 // get the first line
-                lyrics.lines.get(0).unwrap().timestamp;
+                lyrics.lines.first().unwrap();
                 let current = self.state.played_duration();
                 let index = lyrics.lines.binary_search_by(|l| l.timestamp.cmp(&current));
                 if let Err(i) = index {
@@ -1996,7 +2157,7 @@ impl<'a> UI<'a> {
         } else if selected_index.saturating_sub(self.music_list.setp_szie) == 0 {
             self.music_list.selected = 0;
         } else {
-            self.music_list.selected = self.music_list.selected - 7;
+            self.music_list.selected -= 7;
         }
     }
 
@@ -2076,46 +2237,41 @@ impl<'a> UI<'a> {
     // TODO: add a way to handle time_is_correct per line instead
     fn render_lyrics(&mut self, frame: &mut Frame) {
         if self.displayed_lyrics.displayable {
-            match self.geometry.lyrics_geo() {
-                Some(geo) => {
-                    let mut lyrics = self.state.metadata().lyrics;
-                    let mut lines = vec![];
-                    let widths = [Constraint::Fill(4)];
+            if let Some(geo) = self.geometry.lyrics_geo() {
+                let mut lyrics = self.state.metadata().lyrics;
+                let mut lines = vec![];
+                let widths = [Constraint::Fill(4)];
 
-                    for line in lyrics.lines.iter_mut() {
-                        lines.push(Row::new(vec![line.content.as_str()]))
-                    }
-
-                    let style = match self.region {
-                        Region::Lyrics => {
-                            Style::new().fg(self.style.lyrics_style.active_region_color)
-                        }
-                        _ => Style::new().fg(self.style.lyrics_style.passive_region_color),
-                    };
-
-                    let block = match self.region {
-                        Region::Lyrics => Block::default()
-                            .title("Lyrics")
-                            .borders(Borders::ALL)
-                            .fg(self.style.lyrics_style.active_region_color),
-                        _ => Block::default()
-                            .title("Lyrics")
-                            .borders(Borders::ALL)
-                            .fg(self.style.lyrics_style.passive_region_color),
-                    };
-
-                    let table = Table::new(lines, widths)
-                        .block(block)
-                        .style(style)
-                        .highlight_symbol(self.style.lyrics_style.selector.as_str())
-                        .highlight_style(
-                            Style::new()
-                                .add_modifier(Modifier::REVERSED)
-                                .fg(self.style.list_style.hilight_color),
-                        );
-                    frame.render_stateful_widget(table, geo, &mut self.displayed_lyrics.state)
+                for line in lyrics.lines.iter_mut() {
+                    lines.push(Row::new(vec![line.content.as_str()]))
                 }
-                None => {}
+
+                let style = match self.region {
+                    Region::Lyrics => Style::new().fg(self.style.lyrics_style.active_region_color),
+                    _ => Style::new().fg(self.style.lyrics_style.passive_region_color),
+                };
+
+                let block = match self.region {
+                    Region::Lyrics => Block::default()
+                        .title("Lyrics")
+                        .borders(Borders::ALL)
+                        .fg(self.style.lyrics_style.active_region_color),
+                    _ => Block::default()
+                        .title("Lyrics")
+                        .borders(Borders::ALL)
+                        .fg(self.style.lyrics_style.passive_region_color),
+                };
+
+                let table = Table::new(lines, widths)
+                    .block(block)
+                    .style(style)
+                    .highlight_symbol(self.style.lyrics_style.selector.as_str())
+                    .highlight_style(
+                        Style::new()
+                            .add_modifier(Modifier::REVERSED)
+                            .fg(self.style.list_style.hilight_color),
+                    );
+                frame.render_stateful_widget(table, geo, &mut self.displayed_lyrics.state)
             }
         }
     }
@@ -2164,15 +2320,12 @@ impl<'a> UI<'a> {
     }
 
     async fn play_music_from_lyrics(&mut self) {
-        match self.displayed_lyrics.state.selected() {
-            Some(i) => {
-                if self.state.metadata().lyrics.time_is_correct {
-                    if let Some(target_time) = self.displayed_lyrics.lyrics.lines.get(i) {
-                        self.goto_xs(target_time.timestamp).await;
-                    }
+        if let Some(i) = self.displayed_lyrics.state.selected() {
+            if self.state.metadata().lyrics.time_is_correct {
+                if let Some(target_time) = self.displayed_lyrics.lyrics.lines.get(i) {
+                    self.goto_xs(target_time.timestamp).await;
                 }
             }
-            None => {}
         }
     }
 
@@ -2215,7 +2368,6 @@ impl<'a> UI<'a> {
                     Duration::from_secs_f32(time);
             },
             _ = futures::future::ready(()) => {
-                return
             },
         }
     }
@@ -2285,47 +2437,44 @@ impl<'a> UI<'a> {
 
     fn render_playlists(&mut self, frame: &mut Frame<'_>) {
         if self.displayed_playlists.displayable {
-            match self.geometry.playlists_geo() {
-                Some(geo) => {
-                    let names = self.state.playlist_names();
+            if let Some(geo) = self.geometry.playlists_geo() {
+                let names = self.state.playlist_names();
 
-                    let names = names
-                        .iter()
-                        .map(|v| Row::new(vec![v.as_str()]))
-                        .collect::<Vec<Row<'_>>>();
+                let names = names
+                    .iter()
+                    .map(|v| Row::new(vec![v.as_str()]))
+                    .collect::<Vec<Row<'_>>>();
 
-                    let widths = [Constraint::Fill(4)];
+                let widths = [Constraint::Fill(4)];
 
-                    let style = match self.region {
-                        Region::Lyrics => {
-                            Style::new().fg(self.style.playlists_style.active_region_color)
-                        }
-                        _ => Style::new().fg(self.style.playlists_style.passive_region_color),
-                    };
+                let style = match self.region {
+                    Region::Lyrics => {
+                        Style::new().fg(self.style.playlists_style.active_region_color)
+                    }
+                    _ => Style::new().fg(self.style.playlists_style.passive_region_color),
+                };
 
-                    let block = match self.region {
-                        Region::Playlist => Block::default()
-                            .title("Playlists")
-                            .borders(Borders::ALL)
-                            .fg(self.style.playlists_style.active_region_color),
-                        _ => Block::default()
-                            .title("Playlists")
-                            .borders(Borders::ALL)
-                            .fg(self.style.playlists_style.passive_region_color),
-                    };
+                let block = match self.region {
+                    Region::Playlist => Block::default()
+                        .title("Playlists")
+                        .borders(Borders::ALL)
+                        .fg(self.style.playlists_style.active_region_color),
+                    _ => Block::default()
+                        .title("Playlists")
+                        .borders(Borders::ALL)
+                        .fg(self.style.playlists_style.passive_region_color),
+                };
 
-                    let table = Table::new(names, widths)
-                        .block(block)
-                        .style(style)
-                        .highlight_symbol(self.style.playlists_style.selector.as_str())
-                        .highlight_style(
-                            Style::new()
-                                .add_modifier(Modifier::REVERSED)
-                                .fg(self.style.list_style.hilight_color),
-                        );
-                    frame.render_stateful_widget(table, geo, &mut self.displayed_playlists.state)
-                }
-                None => {}
+                let table = Table::new(names, widths)
+                    .block(block)
+                    .style(style)
+                    .highlight_symbol(self.style.playlists_style.selector.as_str())
+                    .highlight_style(
+                        Style::new()
+                            .add_modifier(Modifier::REVERSED)
+                            .fg(self.style.list_style.hilight_color),
+                    );
+                frame.render_stateful_widget(table, geo, &mut self.displayed_playlists.state)
             }
         }
     }
@@ -2361,7 +2510,7 @@ impl<'a> UI<'a> {
     async fn run_command(&mut self) -> std::io::Result<bool> {
         let command = self.command_bufr.to_string();
         let mut commands: Vec<String> = command.split_whitespace().map(|v| v.to_string()).collect();
-        if commands.len() > 0 {
+        if !commands.is_empty() {
             let command_name = commands.remove(0);
             let command_args = commands;
             match CommandName::from_str(&command_name) {
@@ -2394,7 +2543,7 @@ impl<'a> UI<'a> {
         match context.name {
             CommandName::Play => {
                 // guarded by upper if check
-                let direction = args.get(0).unwrap();
+                let direction = args.first().unwrap();
                 match direction.as_str() {
                     "previous" => self.play_preivous().await,
                     "next" => self.play_next().await,
@@ -2403,7 +2552,7 @@ impl<'a> UI<'a> {
             }
             CommandName::Move => {
                 // guarded by upper if check
-                let direction = args.get(0).unwrap();
+                let direction = args.first().unwrap();
                 match direction.as_str() {
                     "up" => self.list_up(),
                     "down" => self.list_down(),
@@ -2411,12 +2560,12 @@ impl<'a> UI<'a> {
                 }
             }
             CommandName::AddToPlaylist => {
-                let name = args.get(0).unwrap();
+                let name = args.first().unwrap();
                 self.add_selected_to_playlist(name).await;
             }
             CommandName::Quit => return Ok(true),
             CommandName::CreatePlaylist => {
-                let name = args.get(0).unwrap();
+                let name = args.first().unwrap();
                 self.crate_playlist(name).await;
             }
             CommandName::ToggleMute => self.toggle_mute().await,
@@ -2424,16 +2573,192 @@ impl<'a> UI<'a> {
             CommandName::Resume => self.state.resume_stream(),
             CommandName::Reload => self.reload().await,
             CommandName::RenamePlaylist => {
-                let old = args.get(0).unwrap();
+                let old = args.first().unwrap();
                 let new = args.get(1).unwrap();
                 self.rename_playlist(old, new).await;
             }
             CommandName::RemovePlaylist => {
-                let name = args.get(0).unwrap();
+                let name = args.first().unwrap();
                 self.remove_playlist(name).await;
+            }
+            CommandName::SoulseekSearch => {
+                let query = args.join(" ");
+                self.soulseek_search(&query).await;
+            }
+            CommandName::SoulseekConnect => {
+                self.soulseek_connect().await;
+            }
+            CommandName::SoulseekDisconnect => {
+                self.soulseek_disconnect().await;
             }
         }
         Ok(false)
+    }
+
+    async fn soulseek_connect(&mut self) {
+        if let Some(config) = &self.soulseek_config {
+            // check if already connected
+            if let Ok(state) = self.state.proxy.slsk_state().await {
+                if state == ConnectionState::Ready {
+                    self.soulseek_status = "already connected".to_string();
+                    self.soulseek_connected = true;
+                    return;
+                }
+            }
+
+            // get connection params from config
+            let username = config.username.clone().unwrap_or_default();
+            let password = config.password.clone().unwrap_or_default();
+            let download_dir = config
+                .download_dir
+                .clone()
+                .unwrap_or_else(|| {
+                    dirs::audio_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                        .join("soulseek")
+                })
+                .to_string_lossy()
+                .to_string();
+
+            self.soulseek_status = "connecting...".to_string();
+
+            match self
+                .state
+                .proxy
+                .slsk_connect(username, password, download_dir)
+                .await
+            {
+                Ok(msg) => {
+                    self.soulseek_status = msg;
+                    self.soulseek_connected = true;
+                }
+                Err(e) => {
+                    self.soulseek_status = format!("connect failed: {}", e);
+                    self.soulseek_connected = false;
+                }
+            }
+        } else {
+            self.soulseek_status = "no soulseek config - add [soulseek] to config.toml".to_string();
+        }
+    }
+
+    async fn soulseek_disconnect(&mut self) {
+        match self.state.proxy.slsk_disconnect().await {
+            Ok(msg) => {
+                self.soulseek_status = msg;
+            }
+            Err(e) => {
+                self.soulseek_status = format!("disconnect error: {}", e);
+            }
+        }
+        self.soulseek_connected = false;
+        self.soulseek_ranked.clear();
+    }
+
+    async fn soulseek_search(&mut self, query: &str) {
+        match self.state.proxy.slsk_search(query.to_string()).await {
+            Ok(msg) => {
+                self.soulseek_status = msg;
+                self.soulseek_ranked.clear();
+            }
+            Err(e) => {
+                self.soulseek_status = format!("search failed: {}", e);
+            }
+        }
+    }
+
+    pub async fn poll_soulseek_results(&mut self) {
+        // poll search results from server
+        if let Ok(results) = self.state.proxy.slsk_get_results().await {
+            if !results.is_empty() && results.len() != self.soulseek_ranked.len() {
+                let total_files = results.len();
+                self.soulseek_ranked = results;
+                self.soulseek_status = format!("found {} files (sorted by quality)", total_files);
+                // show results panel and switch to it
+                if total_files > 0 && !self.soulseek_visible {
+                    self.soulseek_visible = true;
+                    self.soulseek_selected = 0;
+                    self.region = Region::Soulseek;
+                }
+            }
+        }
+
+        // poll download list from server
+        if let Ok(downloads) = self.state.proxy.slsk_get_downloads().await {
+            self.soulseek_download_list = downloads;
+        }
+    }
+
+    fn soulseek_up(&mut self) {
+        if self.soulseek_selected > 0 {
+            self.soulseek_selected -= 1;
+        }
+    }
+
+    fn soulseek_down(&mut self) {
+        let max = self.soulseek_ranked.len().saturating_sub(1);
+        if self.soulseek_selected < max {
+            self.soulseek_selected += 1;
+        }
+    }
+
+    fn soulseek_goto_bottom(&mut self) {
+        self.soulseek_selected = self.soulseek_ranked.len().saturating_sub(1);
+    }
+
+    fn soulseek_scroll_up(&mut self) {
+        self.soulseek_selected = self.soulseek_selected.saturating_sub(10);
+    }
+
+    fn soulseek_scroll_down(&mut self) {
+        let max = self.soulseek_ranked.len().saturating_sub(1);
+        self.soulseek_selected = (self.soulseek_selected + 10).min(max);
+    }
+
+    async fn soulseek_download_selected(&mut self) {
+        let index = self.soulseek_selected as u32;
+        match self.state.proxy.slsk_download(index).await {
+            Ok(msg) => {
+                self.soulseek_status = msg;
+            }
+            Err(e) => {
+                self.soulseek_status = format!("download error: {}", e);
+            }
+        }
+    }
+
+    async fn soulseek_cancel_selected(&mut self) {
+        // cancel download if one is selected from download list
+        if let Some(dl) = self.soulseek_download_list.get(self.soulseek_selected) {
+            match self.state.proxy.slsk_cancel_download(dl.id).await {
+                Ok(msg) => {
+                    self.soulseek_status = msg;
+                }
+                Err(e) => {
+                    self.soulseek_status = format!("cancel error: {}", e);
+                }
+            }
+        }
+    }
+
+    async fn soulseek_clear_finished(&mut self) {
+        match self.state.proxy.slsk_clear_finished().await {
+            Ok(msg) => {
+                self.soulseek_status = msg;
+            }
+            Err(e) => {
+                self.soulseek_status = format!("clear error: {}", e);
+            }
+        }
+    }
+
+    fn toggle_soulseek(&mut self) {
+        self.soulseek_visible = !self.soulseek_visible;
+        if self.soulseek_visible {
+            self.region = Region::Soulseek;
+        } else {
+            self.region = Region::List;
+        }
     }
 
     async fn add_selected_to_playlist(&self, destination: &String) {
@@ -2487,21 +2812,12 @@ pub struct DisplayedLyrics {
     pub last_active_interaction: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DisplayedPlaylists {
     /// Used to toggle playlists view
     displayable: bool,
     /// State/Index of the playlist list pointer
     state: TableState,
-}
-
-impl Default for DisplayedPlaylists {
-    fn default() -> Self {
-        Self {
-            displayable: false,
-            state: TableState::default(),
-        }
-    }
 }
 
 impl Default for DisplayedLyrics {
@@ -2828,11 +3144,11 @@ struct Event {
 
 impl Event {
     fn modifier(&self) -> Kmodifier {
-        self.modifier.clone()
+        self.modifier
     }
 
     fn code(&self) -> KCode {
-        self.code.clone()
+        self.code
     }
 
     fn region(&self) -> Region {

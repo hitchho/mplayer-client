@@ -10,20 +10,11 @@ pub struct Picture {
 }
 
 #[derive(
-    PartialEq, Eq, Debug, Clone, zbus::zvariant::Type, serde::Deserialize, serde::Serialize,
+    PartialEq, Eq, Debug, Clone, zbus::zvariant::Type, serde::Deserialize, serde::Serialize, Default,
 )]
 pub struct Lyrics {
     pub time_is_correct: bool,
     pub lines: Vec<Line>,
-}
-
-impl Default for Lyrics {
-    fn default() -> Self {
-        Self {
-            time_is_correct: false,
-            lines: vec![],
-        }
-    }
 }
 
 #[derive(

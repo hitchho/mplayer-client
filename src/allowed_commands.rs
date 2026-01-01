@@ -24,6 +24,9 @@ pub enum CommandName {
     ToggleMute,
     RenamePlaylist,
     RemovePlaylist,
+    SoulseekSearch,
+    SoulseekConnect,
+    SoulseekDisconnect,
 }
 
 impl CommandName {
@@ -38,7 +41,7 @@ impl CommandName {
             // no arguments
             CommandName::ToggleMute => 0,
             // no arguments
-            CommandName::Reload=> 0,
+            CommandName::Reload => 0,
             // direction up/down
             CommandName::Move => 1,
             CommandName::Play => 1,
@@ -50,6 +53,12 @@ impl CommandName {
             CommandName::RenamePlaylist => 2,
             // Playlist name
             CommandName::RemovePlaylist => 1,
+            // search query
+            CommandName::SoulseekSearch => 1,
+            // no arguments
+            CommandName::SoulseekConnect => 0,
+            // no arguments
+            CommandName::SoulseekDisconnect => 0,
         }
     }
 }
@@ -70,6 +79,9 @@ impl FromStr for CommandName {
             "reload" => Ok(Self::Reload),
             "resume" => Ok(Self::Resume),
             "q" | "quit" => Ok(Self::Quit),
+            "slsk" | "soulseek" | "slsk_search" => Ok(Self::SoulseekSearch),
+            "slsk_connect" => Ok(Self::SoulseekConnect),
+            "slsk_disconnect" => Ok(Self::SoulseekDisconnect),
             _ => Err(std::io::Error::other(format!(
                 "Unkown command variant {}",
                 s

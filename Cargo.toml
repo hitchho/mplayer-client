@@ -14,8 +14,11 @@ keywords = ["music", "music-client", "mplayer-client", "mplayer", "linux", "dbus
 [dependencies]
 basic-toml = "0.1.9"
 crossterm = "0.27.0"
+dirs = "5.0"
+flate2 = "1.0"
 futures = "0.3.31"
 fuzzy-matcher = "0.3.7"
+md5 = "0.7"
 ratatui = "0.28.0"
 serde = "1.0.204"
 tokio = { version = "1.44.1", features = ["full"] }

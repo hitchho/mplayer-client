@@ -1,6 +1,6 @@
 # NOTE: every single option can be omitted
 [config]
-sorting = "ByDurationAscending" # ByTitleAscending, ByTitleDescending, ByDurationAscending, ByDurationDescending, Shuffle 
+sorting = "ByDurationAscending" # ByTitleAscending, ByTitleDescending, ByDurationAscending, ByDurationDescending, Shuffle
 repeat = "AllMusics" # repeat state, other avilable options are `Dont, ThisMusic`
 fps = 30 # FPS, default to 30
 lyrics = true # display lyrics, defaults to false
@@ -15,3 +15,15 @@ list = "/home/user/.config/mplayer-client/lua/list.lua"
 # actions = "/home/user/.config/mplayer-client/actions.lua"
 # seeker = "/home/user/.config/mplayer-client/seeker.lua"
 # volume = "/home/user/.config/mplayer-client/volume.lua"
+
+[soulseek]
+# soulseek network search for music
+# enabled = true
+# username = "your_username"
+# password = "your_password"
+# server_host = "server.slsknet.org"
+# server_port = 2242
+# listen_port = 2234
+# max_results = 50
+# download_dir = "/home/user/Music/soulseek"
+# share_dir = "/home/user/Music/shared"  # optional, uses dummy file if not set

@@ -11,6 +11,7 @@ use crossterm::{
 };
 use parser::*;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use soulseek_types::{ConnectionState, Download, RankedFile};
 use types::Lyrics;
 use types::Metadata;
 use types::OuterMusic;
@@ -25,6 +26,7 @@ use zbus::{proxy, Connection, Result};
 mod allowed_commands;
 mod fuzzy_search;
 mod parser;
+mod soulseek_types;
 mod states;
 mod style;
 mod types;
@@ -167,6 +169,22 @@ pub trait Server {
     #[zbus(signal)]
     #[allow(unused)]
     async fn playlist_created(&mut self, id: &str) -> zbus::Result<()>;
+
+    // soulseek methods
+    async fn slsk_connect(
+        &self,
+        username: String,
+        password: String,
+        download_dir: String,
+    ) -> Result<String>;
+    async fn slsk_disconnect(&self) -> Result<String>;
+    async fn slsk_state(&self) -> Result<ConnectionState>;
+    async fn slsk_search(&self, query: String) -> Result<String>;
+    async fn slsk_get_results(&self) -> Result<Vec<RankedFile>>;
+    async fn slsk_download(&self, index: u32) -> Result<String>;
+    async fn slsk_get_downloads(&self) -> Result<Vec<Download>>;
+    async fn slsk_cancel_download(&self, id: u32) -> Result<String>;
+    async fn slsk_clear_finished(&self) -> Result<String>;
 }
 
 pub fn init_panic_hook() {
@@ -200,11 +218,7 @@ async fn main() -> Result<()> {
     } else {
         let mut home = env::var("HOME").unwrap().to_string();
         home.push_str("/.config/mplayer-client/config.toml");
-        if let Ok(config) = Config::parse_config(&home) {
-            config
-        } else {
-            Config::default()
-        }
+        Config::parse_config(&home).unwrap_or_default()
     };
 
     let mut ui = ui::UI::new(proxy);
@@ -219,6 +233,8 @@ async fn main() -> Result<()> {
                 ui.render(frame);
             })?;
             ui.update_state().await;
+            // poll soulseek for search results
+            ui.poll_soulseek_results().await;
             should_quit = handle_events(&mut ui).await?;
         }
     }
@@ -234,5 +250,5 @@ async fn handle_events<'a>(ui: &mut ui::UI<'a>) -> io::Result<bool> {
             return ui::Region::handle_events(ui, &key).await;
         }
     }
-    return Ok(false);
+    Ok(false)
 }

@@ -15,12 +15,11 @@ pub trait StringFeatures {
 /// - failed to create or write to the file
 pub fn log(data: &str, filename: &str) -> std::io::Result<std::fs::File> {
     let mut f = OpenOptions::new()
-        .write(true)
         .append(true)
         .create(true)
         .open(filename)?;
     writeln!(f, "{}", data)?;
-    return std::io::Result::Ok(f);
+    std::io::Result::Ok(f)
 }
 
 impl StringFeatures for String {
@@ -92,10 +91,10 @@ impl RunStatus {
     }
 
     fn handler_errror() -> Self {
-        return RunStatus::new(
-            format!("coudn't get stream handler!"),
+        RunStatus::new(
+            "coudn't get stream handler!".to_string(),
             StatusOption::CoudntGetSHandler,
-        );
+        )
     }
 }
 
@@ -131,7 +130,7 @@ impl FPSController {
             self.register_instant();
             return true;
         }
-        return false;
+        false
     }
 
     fn register_instant(&mut self) {

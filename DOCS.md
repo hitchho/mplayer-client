@@ -68,6 +68,50 @@
 |`:remove_playlist <playlist-name>`|Remove playlis by the name (can't remove `default` and requires reload to take effect)|
 |`:toggle_mute`|Toggle mute|
 |`:q` | `:quit`|Quit client|
+|`:slsk_connect`|Connect to soulseek network (requires config)|
+|`:slsk_disconnect`|Disconnect from soulseek network|
+|`:slsk <query>` | `:soulseek <query>`|Search for music on soulseek network|
+
+# Soulseek
+
+Soulseek integration allows searching and downloading music from the soulseek p2p network. This feature is completely optional and only activates when configured.
+
+## Registration
+
+Soulseek uses optimistic registration - if you connect with a username that doesn't exist, the server automatically creates an account with that username and password. No separate registration step is needed.
+
+## Soulseek Keybinds
+
+|Region|Keybind|Desc|
+|------|-------|-----|
+|Any|`Ctrl + s`|Toggle soulseek panel|
+|Soulseek|`j`|Move down in results|
+|Soulseek|`k`|Move up in results|
+|Soulseek|`Enter` or `Space`|Queue selected file for download|
+|Soulseek|`d` or `Delete`|Cancel selected download|
+|Soulseek|`c`|Clear finished downloads|
+|Soulseek|`G`|Go to bottom of results|
+|Soulseek|`Ctrl + d`|Scroll down 10 items|
+|Soulseek|`Ctrl + u`|Scroll up 10 items|
+|Soulseek|`q` or `Esc`|Close soulseek panel|
+
+## Soulseek Results Display
+
+Results are automatically sorted by quality score which considers:
+- **Format**: FLAC > WAV > ALAC > MP3 > OGG > AAC > WMA
+- **Bitrate**: Higher bitrate = better score
+- **Sample Rate**: Higher than 44.1kHz gets bonus points
+- **VBR**: VBR gets slight bonus for lossy formats
+- **Availability**: Free slots and fast uploads get bonus
+
+## Download States
+
+Downloads are shown with colored status:
+- **Gray**: Pending (queued)
+- **Yellow**: Connecting to peer
+- **Cyan**: Downloading (with progress bar)
+- **Green**: Complete
+- **Red**: Failed or Cancelled
 
 # Configuration
 
@@ -90,7 +134,25 @@ list = "/home/user/.config/mplayer-client/lua/list.lua"
 # actions = "/home/user/.config/mplayer-client/actions.lua"
 # seeker = "/home/user/.config/mplayer-client/seeker.lua"
 # volume = "/home/user/.config/mplayer-client/volume.lua"
+
+[soulseek]
+# soulseek network search for music
+enabled = true
+username = "your_username"
+password = "your_password"
+# server_host = "server.slsknet.org"
+# server_port = 2242
+# listen_port = 2234
+# max_results = 50
+# download_dir = "/home/user/Music/soulseek"
+# share_dir = "/home/user/Music/shared"  # optional
 ```
+
+## Soulseek Sharing
+
+Soulseek requires users to share files to participate in the network. By default, mplayer-client shares a virtual dummy.mp3 file (100KB, 128kbps, 3 minutes) to satisfy this requirement without exposing any real files.
+
+If you want to share a real directory, set `share_dir` in your config. Otherwise, the dummy file is used automatically.
 
 ## Config
 
