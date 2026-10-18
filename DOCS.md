@@ -85,12 +85,14 @@ Soulseek uses optimistic registration - if you connect with a username that does
 |Region|Keybind|Desc|
 |------|-------|-----|
 |Any|`Ctrl + s`|Toggle soulseek panel|
-|Soulseek|`j`|Move down in results|
-|Soulseek|`k`|Move up in results|
-|Soulseek|`Enter` or `Space`|Queue selected file for download|
-|Soulseek|`d` or `Delete`|Cancel selected download|
+|Soulseek|`Tab` or `Shift + Tab`|Switch focus between the results table and the downloads list (the focused one has a yellow border and highlighted row)|
+|Soulseek|`j`|Move down in the focused list|
+|Soulseek|`k`|Move up in the focused list|
+|Soulseek|`Enter` or `Space`|Queue selected result for download (results focused)|
+|Soulseek|`d` or `Delete`|Cancel selected download (downloads focused)|
+|Soulseek|`:`|Open the command input, returns to the soulseek panel afterwards|
 |Soulseek|`c`|Clear finished downloads|
-|Soulseek|`G`|Go to bottom of results|
+|Soulseek|`G`|Go to bottom of the focused list|
 |Soulseek|`Ctrl + d`|Scroll down 10 items|
 |Soulseek|`Ctrl + u`|Scroll up 10 items|
 |Soulseek|`q` or `Esc`|Close soulseek panel|

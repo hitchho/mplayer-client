@@ -82,4 +82,17 @@ mod test {
             Err(_) => panic!(),
         }
     }
+
+    #[test]
+    fn parse_soulseek_settings() {
+        let conf: Config = basic_toml::from_str(
+            "[soulseek]\nserver_host = \"h\"\nserver_port = 1\nlisten_port = 2\nmax_results = 3\n",
+        )
+        .unwrap();
+        let s = conf.soulseek.unwrap();
+        assert_eq!(s.server_host.as_deref(), Some("h"));
+        assert_eq!(s.server_port, Some(1));
+        assert_eq!(s.listen_port, Some(2));
+        assert_eq!(s.max_results, Some(3));
+    }
 }

@@ -333,6 +333,8 @@ pub struct UI<'a> {
     search_bufr: Input,
     /// command buffer, used to input commands
     command_bufr: Input,
+    /// error from the last submitted command, shown in the command box title
+    command_error: Option<String>,
     /// helps reading a combination of keys like `gg`
     pub anticipation_mode: AncitipationMode,
     /// what to repeat <ThisMusic, AllMusics, None>
@@ -363,6 +365,21 @@ pub struct UI<'a> {
     pub soulseek_download_list: Vec<Download>,
     /// Selected index in soulseek results
     pub soulseek_selected: usize,
+    /// the user moved the results cursor since the last search; until then it stays on the top
+    /// row while results stream in instead of following whichever result arrived first
+    soulseek_selection_moved: bool,
+    /// Selected index in the soulseek downloads list
+    pub soulseek_download_selected: usize,
+    /// Which soulseek list currently has focus
+    pub soulseek_focus: SoulseekFocus,
+    /// Table state of the results table (keeps scroll offset)
+    pub soulseek_results_state: TableState,
+    /// Table state of the downloads table (keeps scroll offset)
+    pub soulseek_downloads_state: TableState,
+    /// A search was started from this session, open the panel when results arrive
+    pub soulseek_open_on_results: bool,
+    /// The command input was opened from the soulseek region, go back there afterwards
+    pub command_from_soulseek: bool,
     /// Whether showing soulseek results panel
     pub soulseek_visible: bool,
     /// Soulseek connection state
@@ -401,9 +418,35 @@ impl Functions {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+/// Focused list inside the soulseek panel
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoulseekFocus {
+    #[default]
+    Results,
+    Downloads,
+}
+
+/// Index of the previously selected item in a refreshed list, so that the selection stays on the
+/// same item when the list is re-sorted. Falls back to the old index if the item is gone, and the
+/// result is always in range (0 for an empty list).
+fn anchored_index<T>(
+    old: &[T],
+    new: &[T],
+    selected: usize,
+    same: impl Fn(&T, &T) -> bool,
+) -> usize {
+    let found = old
+        .get(selected)
+        .and_then(|prev| new.iter().position(|n| same(prev, n)));
+    found.unwrap_or(selected).min(new.len().saturating_sub(1))
+}
+
+fn same_result(a: &RankedFile, b: &RankedFile) -> bool {
+    a.username == b.username && a.file.filename == b.file.filename
+}
+
 /// all the displayed region
-#[derive(Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub enum Region {
     #[default]
     List,
@@ -490,6 +533,7 @@ impl ListMode {
                                     ui.change_list_mode(ListMode::Search)
                                 }
                                 ':' => {
+                                    ui.command_from_soulseek = false;
                                     ui.change_list_mode(ListMode::Command);
                                     ui.select_region(Region::Command);
                                 }
@@ -542,16 +586,24 @@ impl ListMode {
             if key.modifiers == KeyModifiers::NONE {
                 match key.code {
                     KeyCode::Enter => {
-                        if ui.run_command().await? {
-                            return Ok(true);
+                        match ui.run_command().await {
+                            Ok(true) => return Ok(true),
+                            Ok(false) => {}
+                            Err(e) => {
+                                // keep the input open so the command can be fixed
+                                ui.command_error = Some(e.to_string());
+                                return Ok(false);
+                            }
                         }
+                        ui.clear_command();
                         ui.change_list_mode(ListMode::Select);
-                        ui.select_region(Region::List);
+                        ui.leave_command_region();
                         return Ok(false);
                     }
                     KeyCode::Esc => {
+                        ui.clear_command();
                         ui.change_list_mode(ListMode::Select);
-                        ui.select_region(Region::List);
+                        ui.leave_command_region();
                         return Ok(false);
                     }
                     _ => {}
@@ -658,7 +710,12 @@ impl Region {
                         ui.soulseek_download_selected().await;
                     }
                     KeyCode::Char('d') | KeyCode::Delete => {
-                        ui.soulseek_cancel_selected().await;
+                        if ui.soulseek_focus == SoulseekFocus::Downloads {
+                            ui.soulseek_cancel_selected().await;
+                        } else {
+                            ui.soulseek_status =
+                                "press Tab to focus downloads, then d to cancel".to_string();
+                        }
                     }
                     KeyCode::Char('c') => {
                         ui.soulseek_clear_finished().await;
@@ -667,13 +724,18 @@ impl Region {
                         ui.soulseek_goto_bottom();
                     }
                     KeyCode::Char(':') => {
-                        ui.mode = ListMode::Command;
+                        ui.command_from_soulseek = true;
+                        ui.change_list_mode(ListMode::Command);
+                        ui.select_region(Region::Command);
                     }
+                    KeyCode::Tab | KeyCode::BackTab => ui.soulseek_switch_focus(),
                     _ => {}
                 },
                 KeyModifiers::SHIFT => {
-                    if let KeyCode::Char('G') = key.code {
-                        ui.soulseek_goto_bottom()
+                    match key.code {
+                        KeyCode::BackTab => ui.soulseek_switch_focus(),
+                        KeyCode::Char('G') => ui.soulseek_goto_bottom(),
+                        _ => {}
                     }
                 }
                 KeyModifiers::CONTROL => match key.code {
@@ -1082,6 +1144,7 @@ impl<'a> UI<'a> {
             mode: ListMode::default(),
             search_bufr: Input::default(),
             command_bufr: Input::default(),
+            command_error: None,
             anticipation_mode: AncitipationMode::default(),
             displayed_repeat: Repeat::default(),
             displayed_sort: Sort::default(),
@@ -1095,6 +1158,13 @@ impl<'a> UI<'a> {
             soulseek_status: String::new(),
             soulseek_download_list: Vec::new(),
             soulseek_selected: 0,
+            soulseek_selection_moved: false,
+            soulseek_download_selected: 0,
+            soulseek_focus: SoulseekFocus::default(),
+            soulseek_results_state: TableState::new(),
+            soulseek_downloads_state: TableState::new(),
+            soulseek_open_on_results: false,
+            command_from_soulseek: false,
             soulseek_visible: false,
             soulseek_connected: false,
             soulseek_config: None,
@@ -1779,12 +1849,19 @@ impl<'a> UI<'a> {
             height: area.height.saturating_sub(7),
         };
 
-        let is_selected = matches!(self.region, Region::Soulseek);
-        let border_style = if is_selected {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Gray)
+        // the panel overlays the music list, wipe what is underneath
+        frame.render_widget(Clear, slsk_area);
+
+        let is_selected = matches!(self.region, Region::Soulseek)
+            || (self.command_from_soulseek && matches!(self.region, Region::Command));
+        let border_for = |focused: bool| {
+            if is_selected && focused {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Gray)
+            }
         };
+        let results_focused = self.soulseek_focus == SoulseekFocus::Results;
 
         // split into results and downloads
         let chunks = Layout::default()
@@ -1793,27 +1870,19 @@ impl<'a> UI<'a> {
             .split(slsk_area);
 
         // render search results
-        self.render_soulseek_results(frame, chunks[0], border_style);
+        self.render_soulseek_results(frame, chunks[0], border_for(results_focused));
 
         // render downloads
-        self.render_soulseek_downloads(frame, chunks[1], border_style);
+        self.render_soulseek_downloads(frame, chunks[1], border_for(!results_focused));
     }
 
-    fn render_soulseek_results(&self, frame: &mut Frame, area: Rect, border_style: Style) {
+    fn render_soulseek_results(&mut self, frame: &mut Frame, area: Rect, border_style: Style) {
         let title = format!(" soulseek results ({}) ", self.soulseek_ranked.len());
 
         let rows: Vec<Row> = self
             .soulseek_ranked
             .iter()
-            .enumerate()
-            .map(|(i, rf)| {
-                let selected = i == self.soulseek_selected;
-                let style = if selected {
-                    Style::default().bg(Color::DarkGray).fg(Color::White)
-                } else {
-                    Style::default()
-                };
-
+            .map(|rf| {
                 let format = rf.file.extension().unwrap_or("?");
                 let bitrate = if rf.file.bitrate > 0 {
                     format!("{}k", rf.file.bitrate)
@@ -1831,7 +1900,6 @@ impl<'a> UI<'a> {
                     Cell::from(format!("{}", score)),
                     Cell::from(rf.username.clone()),
                 ])
-                .style(style)
             })
             .collect();
 
@@ -1854,12 +1922,27 @@ impl<'a> UI<'a> {
                     .borders(Borders::ALL)
                     .border_style(border_style)
                     .title(title),
-            );
+            )
+            .highlight_style(self.soulseek_highlight(true));
 
-        frame.render_widget(table, area);
+        self.soulseek_results_state
+            .select((!self.soulseek_ranked.is_empty()).then_some(self.soulseek_selected));
+        frame.render_stateful_widget(table, area, &mut self.soulseek_results_state);
     }
 
-    fn render_soulseek_downloads(&self, frame: &mut Frame, area: Rect, border_style: Style) {
+    /// Highlight style of the selected row, only visible in the focused list
+    fn soulseek_highlight(&self, results: bool) -> Style {
+        let focused = (self.soulseek_focus == SoulseekFocus::Results) == results;
+        if focused {
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }
+    }
+
+    fn render_soulseek_downloads(&mut self, frame: &mut Frame, area: Rect, border_style: Style) {
         let title = format!(
             " downloads ({}) - {} ",
             self.soulseek_download_list.len(),
@@ -1920,9 +2003,13 @@ impl<'a> UI<'a> {
                     .borders(Borders::ALL)
                     .border_style(border_style)
                     .title(title),
-            );
+            )
+            .highlight_style(self.soulseek_highlight(false));
 
-        frame.render_widget(table, area);
+        self.soulseek_downloads_state.select(
+            (!self.soulseek_download_list.is_empty()).then_some(self.soulseek_download_selected),
+        );
+        frame.render_stateful_widget(table, area, &mut self.soulseek_downloads_state);
     }
 
     /// Handles music selection in the music list
@@ -1961,6 +2048,12 @@ impl<'a> UI<'a> {
     }
 
     /// Appends the char to the existing command buffer
+    /// Empties the command input and forgets the last command error
+    fn clear_command(&mut self) {
+        self.command_bufr.reset();
+        self.command_error = None;
+    }
+
     pub async fn register_command_query(&mut self, c: KeyEvent) {
         self.command_bufr
             .handle_event(&crossterm::event::Event::Key(c));
@@ -2499,8 +2592,12 @@ impl<'a> UI<'a> {
         if matches!(self.mode, ListMode::Command) {
             if let Some(geo) = self.geometry.command_geo() {
                 frame.render_widget(
-                    Paragraph::new(self.command_bufr.value())
-                        .block(Block::bordered().title("Command")),
+                    Paragraph::new(self.command_bufr.value()).block(
+                        Block::bordered().title(match &self.command_error {
+                            Some(e) => format!("Command ({})", e),
+                            None => "Command".to_string(),
+                        }),
+                    ),
                     geo,
                 );
             }
@@ -2515,7 +2612,9 @@ impl<'a> UI<'a> {
             let command_args = commands;
             match CommandName::from_str(&command_name) {
                 Ok(name) => return self.preform(CommandContext::new(name, command_args)).await,
-                Err(e) => todo!("{:?}", e),
+                Err(_) => {
+                    return Err(io::Error::other(format!("unknown command: {}", command_name)))
+                }
             }
         }
         Ok(false)
@@ -2535,7 +2634,9 @@ impl<'a> UI<'a> {
 
     async fn preform(&mut self, context: CommandContext) -> Result<bool, io::Error> {
         let args = context.args;
-        if args.len() > context.name.number_of_required_args() {
+        // a search query may contain spaces, so it takes every remaining word
+        let takes_rest = matches!(context.name, CommandName::SoulseekSearch);
+        if !takes_rest && args.len() > context.name.number_of_required_args() {
             return Err(std::io::Error::other("Too many arguments"));
         } else if args.len() < context.name.number_of_required_args() {
             return Err(std::io::Error::other("Few arguments"));
@@ -2620,12 +2721,28 @@ impl<'a> UI<'a> {
                 .to_string_lossy()
                 .to_string();
 
+            let server_host = config
+                .server_host
+                .clone()
+                .unwrap_or_else(|| "server.slsknet.org".to_string());
+            let server_port = config.server_port.unwrap_or(2242) as u32;
+            let listen_port = config.listen_port.unwrap_or(2234) as u32;
+            let max_results = config.max_results.unwrap_or(50) as u32;
+
             self.soulseek_status = "connecting...".to_string();
 
             match self
                 .state
                 .proxy
-                .slsk_connect(username, password, download_dir)
+                .slsk_connect(
+                    username,
+                    password,
+                    download_dir,
+                    server_host,
+                    server_port,
+                    listen_port,
+                    max_results,
+                )
                 .await
             {
                 Ok(msg) => {
@@ -2652,7 +2769,10 @@ impl<'a> UI<'a> {
             }
         }
         self.soulseek_connected = false;
+        self.soulseek_open_on_results = false;
         self.soulseek_ranked.clear();
+        self.soulseek_selected = 0;
+        self.soulseek_selection_moved = false;
     }
 
     async fn soulseek_search(&mut self, query: &str) {
@@ -2660,6 +2780,9 @@ impl<'a> UI<'a> {
             Ok(msg) => {
                 self.soulseek_status = msg;
                 self.soulseek_ranked.clear();
+                self.soulseek_selected = 0;
+                self.soulseek_selection_moved = false;
+                self.soulseek_open_on_results = true;
             }
             Err(e) => {
                 self.soulseek_status = format!("search failed: {}", e);
@@ -2670,54 +2793,122 @@ impl<'a> UI<'a> {
     pub async fn poll_soulseek_results(&mut self) {
         // poll search results from server
         if let Ok(results) = self.state.proxy.slsk_get_results().await {
-            if !results.is_empty() && results.len() != self.soulseek_ranked.len() {
-                let total_files = results.len();
-                self.soulseek_ranked = results;
-                self.soulseek_status = format!("found {} files (sorted by quality)", total_files);
-                // show results panel and switch to it
-                if total_files > 0 && !self.soulseek_visible {
-                    self.soulseek_visible = true;
-                    self.soulseek_selected = 0;
-                    self.region = Region::Soulseek;
-                }
-            }
+            self.apply_soulseek_results(results);
         }
 
         // poll download list from server
         if let Ok(downloads) = self.state.proxy.slsk_get_downloads().await {
-            self.soulseek_download_list = downloads;
+            self.apply_soulseek_downloads(downloads);
+        }
+    }
+
+    /// Replaces the results, keeping the selection on the same (username, filename)
+    fn apply_soulseek_results(&mut self, results: Vec<RankedFile>) {
+        self.soulseek_selected = if self.soulseek_selection_moved {
+            anchored_index(
+                &self.soulseek_ranked,
+                &results,
+                self.soulseek_selected,
+                same_result,
+            )
+        } else {
+            0
+        };
+        if !results.is_empty() && results.len() != self.soulseek_ranked.len() {
+            self.soulseek_status = format!("found {} files (sorted by quality)", results.len());
+        }
+        let has_results = !results.is_empty();
+        self.soulseek_ranked = results;
+
+        // only open the panel for a search started from this session, and never while typing
+        // a command
+        if has_results
+            && self.soulseek_open_on_results
+            && !matches!(self.mode, ListMode::Command | ListMode::Search)
+        {
+            self.soulseek_open_on_results = false;
+            self.soulseek_visible = true;
+            self.soulseek_focus = SoulseekFocus::Results;
+            self.region = Region::Soulseek;
+        }
+    }
+
+    /// Replaces the downloads, keeping the selection on the same download id
+    fn apply_soulseek_downloads(&mut self, downloads: Vec<Download>) {
+        self.soulseek_download_selected = anchored_index(
+            &self.soulseek_download_list,
+            &downloads,
+            self.soulseek_download_selected,
+            |a, b| a.id == b.id,
+        );
+        self.soulseek_download_list = downloads;
+    }
+
+    fn soulseek_switch_focus(&mut self) {
+        self.soulseek_focus = match self.soulseek_focus {
+            SoulseekFocus::Results => SoulseekFocus::Downloads,
+            SoulseekFocus::Downloads => SoulseekFocus::Results,
+        };
+    }
+
+    /// Returns from the command input to the region it was opened from
+    fn leave_command_region(&mut self) {
+        if self.command_from_soulseek && self.soulseek_visible {
+            self.select_region(Region::Soulseek);
+        } else {
+            self.select_region(Region::List);
+        }
+        self.command_from_soulseek = false;
+    }
+
+    /// Selection and length of the focused soulseek list
+    fn soulseek_focused(&mut self) -> (&mut usize, usize) {
+        if self.soulseek_focus == SoulseekFocus::Results {
+            self.soulseek_selection_moved = true;
+        }
+        match self.soulseek_focus {
+            SoulseekFocus::Results => (&mut self.soulseek_selected, self.soulseek_ranked.len()),
+            SoulseekFocus::Downloads => (
+                &mut self.soulseek_download_selected,
+                self.soulseek_download_list.len(),
+            ),
         }
     }
 
     fn soulseek_up(&mut self) {
-        if self.soulseek_selected > 0 {
-            self.soulseek_selected -= 1;
-        }
+        let (sel, _) = self.soulseek_focused();
+        *sel = sel.saturating_sub(1);
     }
 
     fn soulseek_down(&mut self) {
-        let max = self.soulseek_ranked.len().saturating_sub(1);
-        if self.soulseek_selected < max {
-            self.soulseek_selected += 1;
-        }
+        let (sel, len) = self.soulseek_focused();
+        *sel = (*sel + 1).min(len.saturating_sub(1));
     }
 
     fn soulseek_goto_bottom(&mut self) {
-        self.soulseek_selected = self.soulseek_ranked.len().saturating_sub(1);
+        let (sel, len) = self.soulseek_focused();
+        *sel = len.saturating_sub(1);
     }
 
     fn soulseek_scroll_up(&mut self) {
-        self.soulseek_selected = self.soulseek_selected.saturating_sub(10);
+        let (sel, _) = self.soulseek_focused();
+        *sel = sel.saturating_sub(10);
     }
 
     fn soulseek_scroll_down(&mut self) {
-        let max = self.soulseek_ranked.len().saturating_sub(1);
-        self.soulseek_selected = (self.soulseek_selected + 10).min(max);
+        let (sel, len) = self.soulseek_focused();
+        *sel = (*sel + 10).min(len.saturating_sub(1));
     }
 
     async fn soulseek_download_selected(&mut self) {
-        let index = self.soulseek_selected as u32;
-        match self.state.proxy.slsk_download(index).await {
+        if self.soulseek_focus != SoulseekFocus::Results {
+            return;
+        }
+        let Some(rf) = self.soulseek_ranked.get(self.soulseek_selected) else {
+            return;
+        };
+        let (username, filename) = (rf.username.clone(), rf.file.filename.clone());
+        match self.state.proxy.slsk_download(username, filename).await {
             Ok(msg) => {
                 self.soulseek_status = msg;
             }
@@ -2728,8 +2919,11 @@ impl<'a> UI<'a> {
     }
 
     async fn soulseek_cancel_selected(&mut self) {
-        // cancel download if one is selected from download list
-        if let Some(dl) = self.soulseek_download_list.get(self.soulseek_selected) {
+        // cancel the download selected in the downloads list (by id)
+        if let Some(dl) = self
+            .soulseek_download_list
+            .get(self.soulseek_download_selected)
+        {
             match self.state.proxy.slsk_cancel_download(dl.id).await {
                 Ok(msg) => {
                     self.soulseek_status = msg;
@@ -3174,5 +3368,65 @@ impl Event {
             region,
             list_mode,
         }
+    }
+}
+
+#[cfg(test)]
+mod soulseek_tests {
+    use super::*;
+    use crate::soulseek_types::SharedFile;
+
+    fn rf(user: &str, name: &str) -> RankedFile {
+        RankedFile {
+            file: SharedFile {
+                filename: name.to_string(),
+                ..Default::default()
+            },
+            username: user.to_string(),
+            free_slots: true,
+            upload_speed: 0,
+            queue_size: 0,
+            quality_score: 0,
+        }
+    }
+
+    #[test]
+    fn selection_follows_item_when_resorted() {
+        let old = vec![rf("a", "1"), rf("b", "2"), rf("c", "3")];
+        let new = vec![rf("c", "3"), rf("x", "9"), rf("a", "1"), rf("b", "2")];
+        assert_eq!(anchored_index(&old, &new, 1, same_result), 3);
+    }
+
+    #[test]
+    fn same_filename_other_user_is_different() {
+        let old = vec![rf("a", "1"), rf("b", "1")];
+        let new = vec![rf("b", "1"), rf("a", "1")];
+        assert_eq!(anchored_index(&old, &new, 1, same_result), 0);
+    }
+
+    #[test]
+    fn missing_item_clamps_to_length() {
+        let old = vec![rf("a", "1"), rf("b", "2"), rf("c", "3")];
+        let new = vec![rf("a", "1")];
+        assert_eq!(anchored_index(&old, &new, 2, same_result), 0);
+        let new = vec![rf("a", "1"), rf("d", "4")];
+        assert_eq!(anchored_index(&old, &new, 2, same_result), 1);
+    }
+
+    #[test]
+    fn empty_lists_never_out_of_range() {
+        let old: Vec<RankedFile> = vec![];
+        let new = vec![rf("a", "1")];
+        assert_eq!(anchored_index(&old, &new, 5, same_result), 0);
+        assert_eq!(anchored_index(&new, &old, 0, same_result), 0);
+        assert_eq!(anchored_index(&old, &old, 3, same_result), 0);
+    }
+
+    #[test]
+    fn download_selection_anchored_by_id() {
+        let old = vec![(1u32, 'a'), (2, 'b'), (3, 'c')];
+        let new = vec![(3u32, 'c'), (2, 'b')];
+        assert_eq!(anchored_index(&old, &new, 1, |a, b| a.0 == b.0), 1);
+        assert_eq!(anchored_index(&old, &new, 0, |a, b| a.0 == b.0), 0);
     }
 }

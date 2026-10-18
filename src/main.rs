@@ -176,12 +176,16 @@ pub trait Server {
         username: String,
         password: String,
         download_dir: String,
+        server_host: String,
+        server_port: u32,
+        listen_port: u32,
+        max_results: u32,
     ) -> Result<String>;
     async fn slsk_disconnect(&self) -> Result<String>;
     async fn slsk_state(&self) -> Result<ConnectionState>;
     async fn slsk_search(&self, query: String) -> Result<String>;
     async fn slsk_get_results(&self) -> Result<Vec<RankedFile>>;
-    async fn slsk_download(&self, index: u32) -> Result<String>;
+    async fn slsk_download(&self, username: String, filename: String) -> Result<String>;
     async fn slsk_get_downloads(&self) -> Result<Vec<Download>>;
     async fn slsk_cancel_download(&self, id: u32) -> Result<String>;
     async fn slsk_clear_finished(&self) -> Result<String>;
